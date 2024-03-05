@@ -36,12 +36,12 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/pion/webrtc/v4 => ../webrtc
+replace github.com/pion/webrtc/v4 => github.com/atoppi/webrtc/v4 v4.0.0-beta.9.0.20240304154712-2ff0070cfbdb
 
-replace github.com/pion/ice/v3 => ../ice
+replace github.com/pion/ice/v3 => github.com/atoppi/ice/v3 v3.0.4-0.20240304155234-7073da170fb9
 
-replace github.com/pion/transport/v3 => ../transport
+replace github.com/pion/transport/v3 => github.com/atoppi/transport/v3 v3.0.2-0.20240229163202-212155c80bc1
 
-replace github.com/pion/srtp/v3 => ../srtp
+replace github.com/pion/srtp/v3 => github.com/atoppi/srtp/v3 v3.0.2-0.20240229170218-8dfbff255ebd
 
-replace github.com/pion/interceptor => ../interceptor
+replace github.com/pion/interceptor => github.com/atoppi/interceptor v0.1.26-0.20240229171228-996757cae8f6
