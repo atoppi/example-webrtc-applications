@@ -38,13 +38,13 @@ func CreatePipeline(payloadType webrtc.PayloadType, codecName string) *Pipeline 
 	pipelineStr := "appsrc format=time is-live=true do-timestamp=true name=src ! application/x-rtp"
 	switch strings.ToLower(codecName) {
 	case "vp8":
-		pipelineStr += fmt.Sprintf(", payload=%d, encoding-name=VP8-DRAFT-IETF-01 ! rtpvp8depay ! decodebin ! autovideosink", payloadType)
+		pipelineStr += fmt.Sprintf(", payload=%d, encoding-name=VP8-DRAFT-IETF-01 ! rtpvp8depay ! decodebin ! videoconvert ! autovideosink", payloadType)
 	case "opus":
 		pipelineStr += fmt.Sprintf(", payload=%d, encoding-name=OPUS ! rtpopusdepay ! decodebin ! autoaudiosink", payloadType)
 	case "vp9":
-		pipelineStr += " ! rtpvp9depay ! decodebin ! autovideosink"
+		pipelineStr += " ! rtpvp9depay ! decodebin ! videoconvert! autovideosink"
 	case "h264":
-		pipelineStr += " ! rtph264depay ! decodebin ! autovideosink"
+		pipelineStr += " ! rtph264depay ! decodebin ! videoconvert ! autovideosink"
 	case "g722":
 		pipelineStr += " clock-rate=8000 ! rtpg722depay ! decodebin ! autoaudiosink"
 	default:
