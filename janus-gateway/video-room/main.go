@@ -8,13 +8,21 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	janus "github.com/notedit/janus-go"
-	gst "github.com/pion/example-webrtc-applications/v3/internal/gstreamer-src"
-	"github.com/pion/webrtc/v3"
+	gst "github.com/pion/example-webrtc-applications/v3/internal/gstreamer-sink"
+	"github.com/pion/interceptor"
+	"github.com/pion/sdp/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 func watchHandle(handle *janus.Handle) {
@@ -23,94 +31,77 @@ func watchHandle(handle *janus.Handle) {
 		msg := <-handle.Events
 		switch msg := msg.(type) {
 		case *janus.SlowLinkMsg:
-			log.Println("SlowLinkMsg type ", handle.ID)
+			log.Println("Event: SlowLink")
 		case *janus.MediaMsg:
-			log.Println("MediaEvent type", msg.Type, " receiving ", msg.Receiving)
+			log.Printf("Event: Media %v receiving %v\n", msg.Type, msg.Receiving)
 		case *janus.WebRTCUpMsg:
-			log.Println("WebRTCUp type ", handle.ID)
+			log.Println("Event: WebRTC Up")
 		case *janus.HangupMsg:
-			log.Println("HangupEvent type ", handle.ID)
+			log.Println("Event: Hangup")
 		case *janus.EventMsg:
-			log.Printf("EventMsg %+v", msg.Plugindata.Data)
+			log.Printf("Event Msg %+v", msg.Plugindata.Data)
 		}
 	}
 }
 
+func init() {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.LUTC)
+	flag.Usage = func() {
+		fmt.Println("A pion-based Janus videoroom client (subscriber-only)")
+		fmt.Print("\nUsage:\n")
+		fmt.Println("video-room [--ws=ws://localhost:8188/janus] --room=1234 --feed=1000")
+		flag.PrintDefaults()
+	}
+}
+
 func main() {
+
+	janusWs := flag.String("ws", "ws://localhost:8188/janus", "janus websocket endpoint")
+	roomId := flag.Uint64("room", 0, "the room number client will join to")
+	feedId := flag.Uint64("feed", 0, "the feed number client will subscribe to")
+	enableStun := flag.Bool("enable-stun", false, "true to use Google STUN servers to discover srflx candidates")
+	enableRfc8888 := flag.Bool("enable-rfc8888", false, "true to enable RFC8888 support")
+
+	flag.Parse()
+
+	if *roomId == 0 || *feedId == 0 {
+		log.Fatalf("Missing room or feed identifier\n")
+	}
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM)
+
+	go gst.StartMainLoop()
+
+	wg := &sync.WaitGroup{}
+
 	// Everything below is the Pion WebRTC API! Thanks for using it ❤️.
-
-	// Prepare the configuration
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
-		},
-		SDPSemantics: webrtc.SDPSemanticsUnifiedPlanWithFallback,
-	}
-
-	// Create a new RTCPeerConnection
-	peerConnection, err := webrtc.NewPeerConnection(config)
+	log.Printf("Connecting to Janus WebSocket %v\n", *janusWs)
+	gateway, err := janus.Connect(*janusWs)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Error connecting to Janus (%v)\n", err)
 	}
+	log.Println("WebSocket connected")
 
-	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
-		fmt.Printf("Connection State has changed %s \n", connectionState.String())
-	})
-
-	// Create a audio track
-	opusTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: "audio/opus"}, "audio", "pion")
-	if err != nil {
-		panic(err)
-	} else if _, err = peerConnection.AddTrack(opusTrack); err != nil {
-		panic(err)
-	}
-
-	// Create a video track
-	vp8Track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: "video/vp8"}, "video", "pion")
-	if err != nil {
-		panic(err)
-	} else if _, err = peerConnection.AddTrack(vp8Track); err != nil {
-		panic(err)
-	}
-
-	offer, err := peerConnection.CreateOffer(nil)
-	if err != nil {
-		panic(err)
-	}
-
-	// Create channel that is blocked until ICE Gathering is complete
-	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
-
-	if err = peerConnection.SetLocalDescription(offer); err != nil {
-		panic(err)
-	}
-
-	// Block until ICE Gathering is complete, disabling trickle ICE
-	// we do this because we only can exchange one signaling message
-	// in a production application you should exchange ICE Candidates via OnICECandidate
-	<-gatherComplete
-
-	gateway, err := janus.Connect("ws://localhost:8188/janus")
-	if err != nil {
-		panic(err)
-	}
-
+	log.Println("Creating new session")
 	session, err := gateway.Create()
 	if err != nil {
-		panic(err)
+		log.Fatalf("Error creating session (%v)\n", err)
 	}
+	log.Printf("Session created (%v)\n", session.ID)
 
+	log.Println("Attaching new handle")
 	handle, err := session.Attach("janus.plugin.videoroom")
 	if err != nil {
-		panic(err)
+		log.Fatalf("Error attaching to videoroom plugin (%v)\n", err)
 	}
+	log.Printf("Handle attached (%v)\n", handle.ID)
 
 	go func() {
 		for {
 			if _, keepAliveErr := session.KeepAlive(); keepAliveErr != nil {
-				panic(keepAliveErr)
+				log.Println("Error on keepalive", keepAliveErr)
+				return
 			}
 
 			time.Sleep(5 * time.Second)
@@ -119,47 +110,171 @@ func main() {
 
 	go watchHandle(handle)
 
-	_, err = handle.Message(map[string]interface{}{
+	log.Printf("Subscribing to feed %v in room %v\n", *feedId, *roomId)
+	msg, err := handle.Message(map[string]interface{}{
 		"request": "join",
-		"ptype":   "publisher",
-		"room":    1234,
-		"id":      1,
+		"ptype":   "subscriber",
+		"room":    *roomId,
+		"feed":    *feedId,
 	}, nil)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Error subscribing to feed (%v)\n", err)
 	}
 
-	msg, err := handle.Message(map[string]interface{}{
-		"request": "publish",
-		"audio":   true,
-		"video":   true,
-		"data":    false,
+	if msg.Jsep == nil {
+		log.Fatalf("Missing offer from response\n")
+	}
+
+	sdpVal, ok := msg.Jsep["sdp"].(string)
+	if !ok {
+		log.Fatalf("Failed to get SDP offer(%v)\n", err)
+	}
+	log.Printf("Got Offer\n\n%v\n", strings.ReplaceAll(sdpVal, "\\r\\n", "\n"))
+
+	offer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  sdpVal,
+	}
+
+	mediaEngine := &webrtc.MediaEngine{}
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		log.Fatalf("Error registering codecs (%v)\n", err)
+	}
+
+	interceptorRegistry := &interceptor.Registry{}
+	webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry)
+	// Register MID extensions for audio
+	if strings.Contains(offer.SDP, "urn:ietf:params:rtp-hdrext:sdes:mid") {
+		if err := mediaEngine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: sdp.SDESMidURI}, webrtc.RTPCodecTypeAudio); err != nil {
+			log.Fatalf("Error registering rtp hdr extension (%v)\n", err)
+		}
+	}
+	if *enableRfc8888 {
+		log.Println("Using RFC8888")
+		err := webrtc.ConfigureCongestionControlFeedback(mediaEngine, interceptorRegistry)
+		if err != nil {
+			log.Fatalf("Error registering RFC8888 interceptor (%v)\n", err)
+		}
+	}
+
+	// Create a new RTCPeerConnection
+	settingEngine := webrtc.SettingEngine{}
+	settingEngine.SetDTLSRetransmissionInterval(100 * time.Millisecond)
+	settingEngine.EnableEcnParsing(*enableRfc8888)
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(interceptorRegistry), webrtc.WithSettingEngine(settingEngine))
+	config := webrtc.Configuration{
+		ICETransportPolicy: webrtc.ICETransportPolicyAll,
+		ICEServers:         []webrtc.ICEServer{},
+		SDPSemantics:       webrtc.SDPSemanticsUnifiedPlan,
+	}
+	if *enableStun {
+		config.ICEServers = append(config.ICEServers, webrtc.ICEServer{URLs: []string{"stun:stun.l.google.com:19302"}})
+	}
+	peerConnection, err := api.NewPeerConnection(config)
+	if err != nil {
+		log.Fatalf("Error creating Peer Connection (%v)\n", err)
+	}
+
+	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
+		log.Printf("Connection ICE State has changed -> %s \n", connectionState.String())
+	})
+
+	peerConnection.OnConnectionStateChange(func(connectionState webrtc.PeerConnectionState) {
+		log.Printf("Connection State has changed -> %s \n", connectionState.String())
+	})
+
+	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		mime := track.Codec().RTPCodecCapability.MimeType
+		log.Printf("Got track -> %v\n", mime)
+
+		codecName := strings.Split(track.Codec().RTPCodecCapability.MimeType, "/")[1]
+		pipeline := gst.CreatePipeline(track.PayloadType(), strings.ToLower(codecName))
+		log.Printf("Starting gst pipeline")
+		pipeline.Start()
+		wg.Add(1)
+		go func() {
+			defer func() {
+				log.Printf("Stopping gst pipeline")
+				pipeline.Stop()
+				wg.Done()
+			}()
+			buf := make([]byte, 1400)
+			for {
+				i, _, readErr := track.Read(buf)
+				if readErr != nil {
+					return
+				}
+
+				pipeline.Push(buf[:i])
+			}
+		}()
+
+	})
+
+	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	}); err != nil {
+		log.Fatalf("Error adding audio transceiver (%v)\n", err)
+	} else if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	}); err != nil {
+		log.Fatalf("Error adding video transceiver (%v)\n", err)
+	}
+
+	log.Println("Setting remote description")
+	if err = peerConnection.SetRemoteDescription(offer); err != nil {
+		log.Fatalf("Error setting remote description (%v)\n", err)
+	}
+
+	// Create channel that is blocked until ICE Gathering is complete
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+
+	log.Println("Creating answer")
+	answer, answerErr := peerConnection.CreateAnswer(nil)
+	if answerErr != nil {
+		log.Fatalf("Error creating answer (%v)\n", err)
+	}
+
+	log.Println("Setting local description")
+	if err = peerConnection.SetLocalDescription(answer); err != nil {
+		log.Fatalf("Errorsetting local description (%v)\n", err)
+	}
+	log.Printf("Created answer\n\n%v\n", strings.ReplaceAll(answer.SDP, "\\r\\n", "\n"))
+
+	// Block until ICE Gathering is complete, disabling trickle ICE
+	// we do this because we only can exchange one signaling message
+	// in a production application you should exchange ICE Candidates via OnICECandidate
+	log.Println("Waiting for candidate gathering")
+	<-gatherComplete
+
+	log.Println("Sending answer")
+	// now we start
+	_, err = handle.Message(map[string]interface{}{
+		"request": "start",
+		"room":    *roomId,
 	}, map[string]interface{}{
-		"type":    "offer",
+		"type":    "answer",
 		"sdp":     peerConnection.LocalDescription().SDP,
 		"trickle": false,
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Error received for start request (%v)\n", err)
 	}
 
-	if msg.Jsep != nil {
-		sdpVal, ok := msg.Jsep["sdp"].(string)
-		if !ok {
-			panic("failed to cast")
+	select {
+	case <-gateway.GetErrChan():
+		log.Println("Connection error")
+		if peerConnection != nil {
+			peerConnection.Close()
 		}
-		err = peerConnection.SetRemoteDescription(webrtc.SessionDescription{
-			Type: webrtc.SDPTypeAnswer,
-			SDP:  sdpVal,
-		})
-		if err != nil {
-			panic(err)
+		wg.Wait()
+		return
+	case <-interrupt:
+		log.Println("Intercepted interrupt signal")
+		if peerConnection != nil {
+			peerConnection.Close()
 		}
-
-		// Start pushing buffers on these tracks
-		gst.CreatePipeline("opus", []*webrtc.TrackLocalStaticSample{opusTrack}, "audiotestsrc").Start()
-		gst.CreatePipeline("vp8", []*webrtc.TrackLocalStaticSample{vp8Track}, "videotestsrc").Start()
+		wg.Wait()
+		return
 	}
-
-	select {}
 }
