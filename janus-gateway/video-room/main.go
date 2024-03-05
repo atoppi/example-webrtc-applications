@@ -239,7 +239,6 @@ func main() {
 	if err = peerConnection.SetLocalDescription(answer); err != nil {
 		log.Fatalf("Errorsetting local description (%v)\n", err)
 	}
-	log.Printf("Created answer\n\n%v\n", strings.ReplaceAll(answer.SDP, "\\r\\n", "\n"))
 
 	// Block until ICE Gathering is complete, disabling trickle ICE
 	// we do this because we only can exchange one signaling message
@@ -247,7 +246,7 @@ func main() {
 	log.Println("Waiting for candidate gathering")
 	<-gatherComplete
 
-	log.Println("Sending answer")
+	log.Printf("Sending answer\n\n%v\n", strings.ReplaceAll(peerConnection.LocalDescription().SDP, "\\r\\n", "\n"))
 	// now we start
 	_, err = handle.Message(map[string]interface{}{
 		"request": "start",
