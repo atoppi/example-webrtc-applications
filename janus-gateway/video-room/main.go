@@ -21,6 +21,7 @@ import (
 	janus "github.com/notedit/janus-go"
 	gst "github.com/pion/example-webrtc-applications/v3/internal/gstreamer-sink"
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/rfc8888"
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 )
@@ -49,23 +50,29 @@ func init() {
 	flag.Usage = func() {
 		fmt.Println("A pion-based Janus videoroom client (subscriber-only)")
 		fmt.Print("\nUsage:\n")
-		fmt.Println("video-room [--ws=ws://localhost:8188/janus] --room=1234 --feed=1000")
+		fmt.Println("video-room --room=1234 --feed=1000 [options]")
 		flag.PrintDefaults()
 	}
 }
 
 func main() {
 
-	janusWs := flag.String("ws", "ws://localhost:8188/janus", "janus websocket endpoint")
-	roomId := flag.Uint64("room", 0, "the room number client will join to")
-	feedId := flag.Uint64("feed", 0, "the feed number client will subscribe to")
-	enableStun := flag.Bool("enable-stun", false, "true to use Google STUN servers to discover srflx candidates")
-	enableRfc8888 := flag.Bool("enable-rfc8888", false, "true to enable RFC8888 support")
+	janusWs := flag.String("ws", "ws://localhost:8188/janus", "(optional) janus websocket endpoint")
+	roomId := flag.Uint64("room", 0, "room number client will join to")
+	feedId := flag.Uint64("feed", 0, "feed number client will subscribe to")
+	enableStun := flag.Bool("enable-stun", false, "(optional) enable Google STUN servers to discover srflx candidates (default false)")
+	enableRfc8888 := flag.Bool("enable-rfc8888", false, "(optional) enable RFC8888 support (default false)")
+	rfc8888ReportInterval := flag.Uint("rfc8888-interval", 100, "(optional) interval in milliseconds between RFC8888 reports")
 
 	flag.Parse()
 
 	if *roomId == 0 || *feedId == 0 {
-		log.Fatalf("Missing room or feed identifier\n")
+		fmt.Printf("Missing room or feed identifier\n")
+		os.Exit(1)
+	}
+	if *rfc8888ReportInterval < 1 {
+		fmt.Printf("rfc8888 report interval must be a positive number\n")
+		os.Exit(1)
 	}
 
 	interrupt := make(chan os.Signal, 1)
@@ -150,11 +157,15 @@ func main() {
 		}
 	}
 	if *enableRfc8888 {
-		log.Println("Using RFC8888")
-		err := webrtc.ConfigureCongestionControlFeedback(mediaEngine, interceptorRegistry)
+		mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeVideo)
+		mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeAudio)
+		interval := time.Millisecond * (time.Duration(*rfc8888ReportInterval))
+		generator, err := rfc8888.NewSenderInterceptor(rfc8888.SendInterval(interval))
 		if err != nil {
 			log.Fatalf("Error registering RFC8888 interceptor (%v)\n", err)
 		}
+		interceptorRegistry.Add(generator)
+		//webrtc.ConfigureCongestionControlFeedback(mediaEngine, interceptorRegistry)
 	}
 
 	// Create a new RTCPeerConnection
@@ -168,6 +179,7 @@ func main() {
 		SDPSemantics:       webrtc.SDPSemanticsUnifiedPlan,
 	}
 	if *enableStun {
+		log.Println("Using google STUN servers for ICE gathering")
 		config.ICEServers = append(config.ICEServers, webrtc.ICEServer{URLs: []string{"stun:stun.l.google.com:19302"}})
 	}
 	peerConnection, err := api.NewPeerConnection(config)
@@ -246,19 +258,21 @@ func main() {
 	log.Println("Waiting for candidate gathering")
 	<-gatherComplete
 
-	log.Printf("Sending answer\n\n%v\n", strings.ReplaceAll(peerConnection.LocalDescription().SDP, "\\r\\n", "\n"))
+	sdpAnswer := peerConnection.LocalDescription().SDP
+	log.Printf("Sending answer\n\n%v\n", strings.ReplaceAll(sdpAnswer, "\\r\\n", "\n"))
 	// now we start
 	_, err = handle.Message(map[string]interface{}{
 		"request": "start",
 		"room":    *roomId,
 	}, map[string]interface{}{
 		"type":    "answer",
-		"sdp":     peerConnection.LocalDescription().SDP,
+		"sdp":     sdpAnswer,
 		"trickle": false,
 	})
 	if err != nil {
 		log.Fatalf("Error received for start request (%v)\n", err)
 	}
+	log.Printf("RFC8888 status (enabled=%v, interval=%v, negotiated=%v)\n", *enableRfc8888, *rfc8888ReportInterval, strings.Contains(sdpAnswer, "a=rtcp-fb:* ack ccfb"))
 
 	select {
 	case <-gateway.GetErrChan():

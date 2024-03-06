@@ -24,7 +24,7 @@ go build
 
 ### Running
 ```
-./video-room [--ws=ws://localhost:8188/janus] --room=1234 --feed=1000 [--enable-rfc8888] [--enable-stun]
+./video-room --room=1234 --feed=1000 [--ws=ws://localhost:8188/janus] [--enable-stun] [--enable-rfc8888] [--rfc8888-interval=100]
 
 ```
 
